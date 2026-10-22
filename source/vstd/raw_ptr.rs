@@ -648,6 +648,47 @@ pub fn ptr_mut_ref<T>(ptr: *mut T, Tracked(perm): Tracked<&mut PointsTo<T>>) -> 
     unsafe { &mut *ptr }
 }
 
+// Preconditions for `add`/`sub`/`offset`: the start and result must stay in one
+// allocated object. That cannot be a normal `requires`, because `assume_specification`
+// cannot take a permission argument. So we state it with the uninterpreted
+// `ptr_same_allocation` below, which the caller proves by holding a `PointsToRaw`
+// over the span.
+/// `addr_a` and `addr_b` lie in, or one past the end of, the same allocated
+/// object with this provenance. Uninterpreted; the axioms below are its only source.
+pub uninterp spec fn ptr_same_allocation(addr_a: int, addr_b: int, provenance: Provenance) -> bool;
+
+/// Holding a `PointsToRaw` over the span between the two addresses proves the
+/// predicate, in both orders: the span's bytes all share one provenance, so both
+/// ends sit in one allocated object. The span stops before the far address, so a
+/// one-past-the-end pointer is allowed. This assumes distinct allocations never
+/// share a provenance; revisit it if vstd ever allows provenance aliasing.
+pub axiom fn axiom_ptr_same_allocation(tracked perm: &PointsToRaw, addr_a: int, addr_b: int)
+    requires
+        addr_a <= addr_b ==> perm.contains_range(addr_a, addr_b - addr_a),
+        addr_b < addr_a ==> perm.contains_range(addr_b, addr_a - addr_b),
+    ensures
+        ptr_same_allocation(addr_a, addr_b, perm.provenance()),
+        ptr_same_allocation(addr_b, addr_a, perm.provenance()),
+;
+
+/// Equal addresses satisfy the predicate with no permission: the span is
+/// zero-length, which also covers any offset of a ZST.
+pub axiom fn axiom_ptr_same_allocation_refl(addr: int, provenance: Provenance)
+    ensures
+        ptr_same_allocation(addr, addr, provenance),
+;
+
+/// A typed `PointsTo<V>` proves the predicate between its cell and one past the
+/// cell. This serves proofs that hold a permission per element, such as iterators.
+pub axiom fn axiom_ptr_same_allocation_typed<V>(tracked perm: &PointsTo<V>)
+    ensures
+        ptr_same_allocation(
+            perm.ptr()@.addr as int,
+            perm.ptr()@.addr + (size_of::<V>() as usize),
+            perm.ptr()@.provenance,
+        ),
+;
+
 macro_rules! pointer_specs {
     ($mod_ident:ident, $ptr_from_data:ident, $mu:tt) => {
         #[cfg(verus_keep_ghost)]
@@ -674,6 +715,82 @@ macro_rules! pointer_specs {
             #[cfg(verus_keep_ghost)]
             pub assume_specification<T: ::core::marker::PointeeSized>[<*$mu T>::with_addr](p: *$mu T, addr: usize) -> (q: *$mu T)
                 ensures q == spec_with_addr(p, addr)
+                opens_invariants none
+                no_unwind;
+
+            // --- pointer arithmetic with safety preconditions: add / sub / offset ---
+
+            /// `add`: the address advances by `count * size_of::<T>()` bytes.
+            pub open spec fn spec_add<T>(p: *$mu T, count: usize) -> *$mu T {
+                $ptr_from_data(PtrData::<T> {
+                    addr: (p@.addr + count * (size_of::<T>() as usize)) as usize,
+                    .. p@
+                })
+            }
+
+            #[verifier::when_used_as_spec(spec_add)]
+            #[cfg(verus_keep_ghost)]
+            pub assume_specification<T>[<*$mu T>::add](p: *$mu T, count: usize) -> (q: *$mu T)
+                requires
+                    count * (size_of::<T>() as usize) <= isize::MAX as int,
+                    p@.addr + count * (size_of::<T>() as usize) <= usize::MAX as int,
+                    ptr_same_allocation(
+                        p@.addr as int,
+                        p@.addr + count * (size_of::<T>() as usize),
+                        p@.provenance,
+                    ),
+                ensures
+                    q == spec_add(p, count),
+                opens_invariants none
+                no_unwind;
+
+            /// `sub`: the address retreats by `count * size_of::<T>()` bytes.
+            pub open spec fn spec_sub<T>(p: *$mu T, count: usize) -> *$mu T {
+                $ptr_from_data(PtrData::<T> {
+                    addr: (p@.addr - count * (size_of::<T>() as usize)) as usize,
+                    .. p@
+                })
+            }
+
+            #[verifier::when_used_as_spec(spec_sub)]
+            #[cfg(verus_keep_ghost)]
+            pub assume_specification<T>[<*$mu T>::sub](p: *$mu T, count: usize) -> (q: *$mu T)
+                requires
+                    count * (size_of::<T>() as usize) <= isize::MAX as int,
+                    count * (size_of::<T>() as usize) <= p@.addr,
+                    ptr_same_allocation(
+                        p@.addr as int,
+                        p@.addr - count * (size_of::<T>() as usize),
+                        p@.provenance,
+                    ),
+                ensures
+                    q == spec_sub(p, count),
+                opens_invariants none
+                no_unwind;
+
+            /// `offset`: signed move of `count * size_of::<T>()` bytes.
+            pub open spec fn spec_offset<T>(p: *$mu T, count: isize) -> *$mu T {
+                $ptr_from_data(PtrData::<T> {
+                    addr: (p@.addr + count * (size_of::<T>() as usize)) as usize,
+                    .. p@
+                })
+            }
+
+            #[verifier::when_used_as_spec(spec_offset)]
+            #[cfg(verus_keep_ghost)]
+            pub assume_specification<T>[<*$mu T>::offset](p: *$mu T, count: isize) -> (q: *$mu T)
+                requires
+                    isize::MIN as int <= count * (size_of::<T>() as usize),
+                    count * (size_of::<T>() as usize) <= isize::MAX as int,
+                    0 <= p@.addr + count * (size_of::<T>() as usize),
+                    p@.addr + count * (size_of::<T>() as usize) <= usize::MAX as int,
+                    ptr_same_allocation(
+                        p@.addr as int,
+                        p@.addr + count * (size_of::<T>() as usize),
+                        p@.provenance,
+                    ),
+                ensures
+                    q == spec_offset(p, count),
                 opens_invariants none
                 no_unwind;
 

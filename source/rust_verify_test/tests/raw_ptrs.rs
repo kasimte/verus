@@ -438,3 +438,219 @@ test_verify_one_file! {
         "cannot borrow `pt` as mutable because it is also borrowed as immutable",
     ])
 }
+
+test_verify_one_file! {
+    #[test] ptr_add_in_bounds_via_points_to_raw verus_code! {
+        use vstd::prelude::*;
+        use vstd::raw_ptr::*;
+
+        // Add across a span we hold a permission for. The permission covers exactly
+        // [addr, addr + count*size), so the result is one past that range. This
+        // exercises the one-past-the-end case.
+        fn ptr_add_in_bounds_via_points_to_raw<T>(
+            p: *mut T,
+            count: usize,
+            Tracked(perm): Tracked<&PointsToRaw>,
+        ) -> (q: *mut T)
+            requires
+                perm.provenance() == p@.provenance,
+                perm.contains_range(p@.addr as int, count * (size_of::<T>() as usize)),
+                count * (size_of::<T>() as usize) <= isize::MAX as int,
+                p@.addr + count * (size_of::<T>() as usize) <= usize::MAX as int,
+            ensures
+                q@.addr == p@.addr + count * (size_of::<T>() as usize),
+                q@.provenance == p@.provenance,
+                q@.metadata == p@.metadata,
+        {
+            proof {
+                axiom_ptr_same_allocation(perm, p@.addr as int,
+                    p@.addr + count * (size_of::<T>() as usize));
+            }
+            unsafe { p.add(count) }
+        }
+
+        // const twin.
+        fn ptr_add_in_bounds_via_points_to_raw_const<T>(
+            p: *const T,
+            count: usize,
+            Tracked(perm): Tracked<&PointsToRaw>,
+        ) -> (q: *const T)
+            requires
+                perm.provenance() == p@.provenance,
+                perm.contains_range(p@.addr as int, count * (size_of::<T>() as usize)),
+                count * (size_of::<T>() as usize) <= isize::MAX as int,
+                p@.addr + count * (size_of::<T>() as usize) <= usize::MAX as int,
+            ensures
+                q@.addr == p@.addr + count * (size_of::<T>() as usize),
+        {
+            proof {
+                axiom_ptr_same_allocation(perm, p@.addr as int,
+                    p@.addr + count * (size_of::<T>() as usize));
+            }
+            unsafe { p.add(count) }
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] ptr_add_zero_offset_no_witness verus_code! {
+        use vstd::prelude::*;
+        use vstd::raw_ptr::*;
+
+        // A zero-byte move needs no permission (the reflexivity axiom). This also
+        // covers ZSTs: size_of == 0 makes the byte offset 0 for any count.
+        fn ptr_add_zero_offset_no_witness<T>(p: *mut T, count: usize) -> (q: *mut T)
+            requires
+                count * (size_of::<T>() as usize) == 0,
+            ensures
+                q@.addr == p@.addr,
+                q@.provenance == p@.provenance,
+        {
+            proof { axiom_ptr_same_allocation_refl(p@.addr as int, p@.provenance); }
+            unsafe { p.add(count) }
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] ptr_sub_to_start_via_points_to_raw verus_code! {
+        use vstd::prelude::*;
+        use vstd::raw_ptr::*;
+
+        // sub retreats to the span start.
+        fn ptr_sub_to_start_via_points_to_raw<T>(
+            p: *mut T,
+            count: usize,
+            Tracked(perm): Tracked<&PointsToRaw>,
+        ) -> (q: *mut T)
+            requires
+                perm.provenance() == p@.provenance,
+                count * (size_of::<T>() as usize) <= p@.addr,
+                count * (size_of::<T>() as usize) <= isize::MAX as int,
+                perm.contains_range(
+                    p@.addr - count * (size_of::<T>() as usize),
+                    count * (size_of::<T>() as usize)),
+            ensures
+                q@.addr == p@.addr - count * (size_of::<T>() as usize),
+                q@.provenance == p@.provenance,
+        {
+            proof {
+                axiom_ptr_same_allocation(perm, p@.addr as int,
+                    p@.addr - count * (size_of::<T>() as usize));
+            }
+            unsafe { p.sub(count) }
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] ptr_offset_negative_via_points_to_raw verus_code! {
+        use vstd::prelude::*;
+        use vstd::raw_ptr::*;
+
+        // offset with a negative count mirrors sub.
+        fn ptr_offset_negative_via_points_to_raw<T>(
+            p: *mut T,
+            count: isize,
+            Tracked(perm): Tracked<&PointsToRaw>,
+        ) -> (q: *mut T)
+            requires
+                count < 0,
+                perm.provenance() == p@.provenance,
+                isize::MIN as int <= count * (size_of::<T>() as usize),
+                0 <= p@.addr + count * (size_of::<T>() as usize),
+                perm.contains_range(
+                    p@.addr + count * (size_of::<T>() as usize),
+                    -(count * (size_of::<T>() as usize))),
+            ensures
+                q@.addr == p@.addr + count * (size_of::<T>() as usize),
+        {
+            proof {
+                // count < 0 and size_of >= 0, so the byte offset is non-positive.
+                // Verus does not infer the sign of a product on its own (it is
+                // nonlinear), and several later steps need that sign: the axiom's
+                // range branch, the isize::MAX bound, and the `as usize` identity
+                // in the postcondition.
+                assert(count * (size_of::<T>() as usize) <= 0) by (nonlinear_arith)
+                    requires count < 0, 0 <= size_of::<T>() as usize;
+                axiom_ptr_same_allocation(perm, p@.addr as int,
+                    p@.addr + count * (size_of::<T>() as usize));
+            }
+            unsafe { p.offset(count) }
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] ptr_add_one_typed_points_to verus_code! {
+        use vstd::prelude::*;
+        use vstd::raw_ptr::*;
+
+        // A typed single-element witness: a PointsTo<V> for the current cell
+        // justifies advancing one element. This is the common case in iterator proofs.
+        fn ptr_add_one_typed_points_to<V>(p: *mut V, Tracked(perm): Tracked<&PointsTo<V>>)
+            -> (q: *mut V)
+            requires
+                perm.ptr() == p,
+                size_of::<V>() as usize <= isize::MAX as int,
+                p@.addr + (size_of::<V>() as usize) <= usize::MAX as int,
+            ensures
+                q@.addr == p@.addr + (size_of::<V>() as usize),
+                q@.provenance == p@.provenance,
+        {
+            proof { axiom_ptr_same_allocation_typed(perm); }
+            unsafe { p.add(1) }
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] ptr_add_missing_witness_fails verus_code! {
+        use vstd::prelude::*;
+        use vstd::raw_ptr::*;
+
+        fn ptr_add_missing_witness_fails<T>(
+            p: *mut T,
+            count: usize,
+            Tracked(perm): Tracked<&PointsToRaw>,
+        ) -> (q: *mut T)
+            requires
+                perm.provenance() == p@.provenance,
+                perm.contains_range(p@.addr as int, count * (size_of::<T>() as usize)),
+                count * (size_of::<T>() as usize) <= isize::MAX as int,
+                p@.addr + count * (size_of::<T>() as usize) <= usize::MAX as int,
+            ensures
+                q@.addr == p@.addr + count * (size_of::<T>() as usize),
+                q@.provenance == p@.provenance,
+                q@.metadata == p@.metadata,
+        {
+            // No axiom_ptr_same_allocation call: the permission never proves the
+            // predicate, so add's same-allocation precondition is unmet.
+            unsafe { p.add(count) } // FAILS
+        }
+    } => Err(err) => assert_fails(err, 1)
+}
+
+test_verify_one_file! {
+    #[test] ptr_add_typed_missing_witness_fails verus_code! {
+        use vstd::prelude::*;
+        use vstd::raw_ptr::*;
+
+        fn ptr_add_typed_missing_witness_fails<V>(
+            p: *mut V,
+            Tracked(perm): Tracked<&PointsTo<V>>,
+        ) -> (q: *mut V)
+            requires
+                perm.ptr() == p,
+                size_of::<V>() as usize <= isize::MAX as int,
+                p@.addr + (size_of::<V>() as usize) <= usize::MAX as int,
+            ensures
+                q@.addr == p@.addr + (size_of::<V>() as usize),
+                q@.provenance == p@.provenance,
+        {
+            // No axiom_ptr_same_allocation_typed call: the predicate is never
+            // proved, so add's precondition is unmet.
+            unsafe { p.add(1) } // FAILS
+        }
+    } => Err(err) => assert_fails(err, 1)
+}
