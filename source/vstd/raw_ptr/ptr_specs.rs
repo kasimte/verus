@@ -385,6 +385,26 @@ macro_rules! pointer_specs {
                 opens_invariants none
                 no_unwind;
 
+            /// Returns a pointer offset by `count * size_of::<T>()` bytes,
+            /// with the same provenance and metadata as the input pointer.
+            pub open spec fn spec_add<T>(p: *$mu T, count: usize) -> *$mu T {
+                $ptr_from_data(PtrData::<T> { addr: (p@.addr + count * size_of::<T>()) as usize, .. p@ })
+            }
+
+            #[verifier::when_used_as_spec(spec_add)]
+            #[cfg(verus_keep_ghost)]
+            pub assume_specification<T>[<*$mu T>::add](p: *$mu T, count: usize) -> (q: *$mu T)
+                requires
+                    (count as int) * (size_of::<T>() as int) <= isize::MAX,
+                    (count as int) * (size_of::<T>() as int) != 0 ==> {
+                        &&& p@.provenance is Some
+                        &&& ptr_addr_in_bounds(p as *mut T)
+                        &&& ptr_addr_in_bounds(spec_add(p, count) as *mut T)
+                    },
+                ensures q == spec_add(p, count)
+                opens_invariants none
+                no_unwind;
+
             }
         }
     };

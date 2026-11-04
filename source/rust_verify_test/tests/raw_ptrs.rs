@@ -391,3 +391,152 @@ test_verify_one_file! {
         }
     } => Ok(())
 }
+
+test_verify_one_file! {
+    #[test] add_in_bounds verus_code! {
+        use vstd::prelude::*;
+        use vstd::raw_ptr::*;
+        use vstd::layout::size_of;
+
+        fn add_in_bounds(p: *mut u32, count: usize)
+            requires
+                p@.provenance is Some,
+                ptr_addr_in_bounds(p),
+                p@.provenance.unwrap().start_addr() <= (p@.addr + count * size_of::<u32>()) as usize,
+                (p@.addr + count * size_of::<u32>()) as usize
+                    <= p@.provenance.unwrap().start_addr() + p@.provenance.unwrap().alloc_len(),
+                count * size_of::<u32>() <= isize::MAX,
+        {
+            let q = unsafe { p.add(count) };
+            assert(q@.addr == (p@.addr + count * size_of::<u32>()) as usize);
+            assert(q@.provenance == p@.provenance);
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] add_in_bounds_const verus_code! {
+        use vstd::prelude::*;
+        use vstd::raw_ptr::*;
+        use vstd::layout::size_of;
+
+        fn add_in_bounds_const(p: *const u32, count: usize)
+            requires
+                p@.provenance is Some,
+                ptr_addr_in_bounds(p as *mut u32),
+                p@.provenance.unwrap().start_addr() <= (p@.addr + count * size_of::<u32>()) as usize,
+                (p@.addr + count * size_of::<u32>()) as usize
+                    <= p@.provenance.unwrap().start_addr() + p@.provenance.unwrap().alloc_len(),
+                count * size_of::<u32>() <= isize::MAX,
+        {
+            let q = unsafe { p.add(count) };
+            assert(q@.addr == (p@.addr + count * size_of::<u32>()) as usize);
+            assert(q@.provenance == p@.provenance);
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] add_zero_noop verus_code! {
+        use vstd::prelude::*;
+        use vstd::raw_ptr::*;
+        use vstd::layout::size_of;
+
+        fn add_zero(p: *mut u32)
+            requires p@.provenance is Some,
+        {
+            assert(0 * (size_of::<u32>() as int) == 0) by (nonlinear_arith);
+            let q = unsafe { p.add(0) };
+            assert(q@.addr == p@.addr);
+        }
+
+        fn add_zst(p: *mut (), count: usize)
+            requires p@.provenance is None,
+        {
+            assert((count as int) * (size_of::<()>() as int) == 0) by (nonlinear_arith)
+                requires
+                    size_of::<()>() == 0,
+            ;
+            let q = unsafe { p.add(count) };
+            assert(q@.addr == p@.addr);
+        }
+    } => Ok(())
+}
+
+test_verify_one_file! {
+    #[test] add_wrap verus_code! {
+        use vstd::prelude::*;
+        use vstd::raw_ptr::*;
+        use vstd::layout::size_of;
+
+        fn add_wrap(p: *mut u32, count: usize)
+            requires
+                p@.provenance is Some,
+                ptr_addr_in_bounds(p),
+                p@.provenance.unwrap().start_addr() <= (p@.addr + count * size_of::<u32>()) as usize,
+                (p@.addr + count * size_of::<u32>()) as usize
+                    <= p@.provenance.unwrap().start_addr() + p@.provenance.unwrap().alloc_len(),
+                count * size_of::<u32>() > isize::MAX,
+        {
+            let _ = unsafe { p.add(count) }; // FAILS
+        }
+    } => Err(err) => assert_fails(err, 1)
+}
+
+test_verify_one_file! {
+    #[test] add_none_prov verus_code! {
+        use vstd::prelude::*;
+        use vstd::raw_ptr::*;
+        use vstd::layout::size_of;
+
+        fn add_none_prov(p: *mut u32, count: usize)
+            requires
+                p@.provenance is None,
+                count * size_of::<u32>() != 0,
+                count * size_of::<u32>() <= isize::MAX,
+        {
+            let _ = unsafe { p.add(count) }; // FAILS
+        }
+    } => Err(err) => assert_fails(err, 1)
+}
+
+test_verify_one_file! {
+    #[test] add_start_oob verus_code! {
+        use vstd::prelude::*;
+        use vstd::raw_ptr::*;
+        use vstd::layout::size_of;
+
+        fn add_start_oob(p: *mut u32, count: usize)
+            requires
+                p@.provenance is Some,
+                !ptr_addr_in_bounds(p),
+                p@.provenance.unwrap().start_addr() <= (p@.addr + count * size_of::<u32>()) as usize,
+                (p@.addr + count * size_of::<u32>()) as usize
+                    <= p@.provenance.unwrap().start_addr() + p@.provenance.unwrap().alloc_len(),
+                count * size_of::<u32>() != 0,
+                count * size_of::<u32>() <= isize::MAX,
+        {
+            let _ = unsafe { p.add(count) }; // FAILS
+        }
+    } => Err(err) => assert_fails(err, 1)
+}
+
+test_verify_one_file! {
+    #[test] add_result_oob verus_code! {
+        use vstd::prelude::*;
+        use vstd::raw_ptr::*;
+        use vstd::layout::size_of;
+
+        fn add_result_oob(p: *mut u32, count: usize)
+            requires
+                p@.provenance is Some,
+                ptr_addr_in_bounds(p),
+                (p@.addr + count * size_of::<u32>()) as usize
+                    > p@.provenance.unwrap().start_addr() + p@.provenance.unwrap().alloc_len(),
+                count * size_of::<u32>() != 0,
+                count * size_of::<u32>() <= isize::MAX,
+        {
+            let _ = unsafe { p.add(count) }; // FAILS
+        }
+    } => Err(err) => assert_fails(err, 1)
+}
